@@ -33,23 +33,23 @@ type DBEntry record {
     string data;
 };
 
-channel<json> reviewChannel;
+channel<json> reviewChannel = new ;
 
-endpoint h2:Client appdb {
+
+h2:Client appdb = new({
     path: "./app-data",
     name: "app-data",
     username: "admin",
     password: "admin"
-};
+});
+
 
 http:AuthProvider basicAuthProvider = {
-   scheme:"basic",
-   authStoreProvider:"config"
+   scheme:"BASIC_AUTH",
+   authStoreProvider:"CONFIG_AUTH_STORE"
 };
 
-endpoint http:SecureListener secureLoanServiceEp {
-   port:9090,
-   authProviders:[basicAuthProvider],
+http:ServiceEndpointConfiguration secureLoanServiceEp = {
    secureSocket: {
        keyStore: {
            path: "${ballerina.home}/bre/security/ballerinaKeystore.p12",
@@ -58,21 +58,38 @@ endpoint http:SecureListener secureLoanServiceEp {
    }
 };
 
+listener http:Listener secureLoanService = new(9090, config = secureLoanServiceEp);
+
+
+
 @http:ServiceConfig {
    basePath:"/LoanService"
 }
-service<http:Service> LoanService bind secureLoanServiceEp {    
+
+service LoanService on secureLoanService {
 
     @http:ResourceConfig {
         body: "appinfo",
         methods: ["POST"],
         path: "/application"
     }
-    @interruptible
-    start_application (endpoint caller, http:Request request, ApplicationInfo appinfo) {
+
+    resource function application(http:Caller caller, http:Request req, ApplicationInfo appinfo) {
+
         string appid = generateApplicationID();
-        _ = caller->respond({"ApplicationID" : appid}) but { 
-                            error e => log:printError("Error sending response", err = e) };
+
+        json jsonMsg;
+        //jsonMsg = <- reviewChannel, appid;
+        jsonMsg = {"ApplicationID" : appid} ;
+
+        //{"ApplicationID" : appid}
+
+
+        error? result = caller -> respond(jsonMsg);
+        if (result is error) {
+            io:println("Error in responding", result);
+        }    
+
         processApplication(appid, appinfo);
         
     }
@@ -81,18 +98,32 @@ service<http:Service> LoanService bind secureLoanServiceEp {
         methods: ["GET"],
         path: "/application/{applicationID}"
     }
-    get_application (endpoint caller, http:Request request, string applicationID) {
-        _ = caller->respond(getApplicationEntry(applicationID)) but { 
-                            error e => log:printError("Error sending response", err = e) };
+
+    resource function get_application(http:Caller caller, http:Request req, string applicationID) {
+
+        json jsonMsg;
+        jsonMsg = getApplicationEntry(applicationID);
+
+        error? result = caller -> respond(jsonMsg);
+        if (result is error) {
+            io:println("Error in responding", result);
+        }            
     }
 
     @http:ResourceConfig {
         methods: ["GET"],
-        path: "/application/"
+        path: "/application/all"
     }
-    get_all_applications (endpoint caller, http:Request request, string applicationID) {
-        _ = caller->respond(getAllApplicationEntries()) but { 
-                            error e => log:printError("Error sending response", err = e) };
+
+    resource function get_all_applications(http:Caller caller, http:Request req, string applicationID) {
+
+        json jsonMsg;
+        jsonMsg = getAllApplicationEntries();
+
+        error? result = caller -> respond(jsonMsg);
+        if (result is error) {
+            io:println("Error in responding", result);
+        }            
     }
     
     @http:ResourceConfig {
@@ -103,21 +134,41 @@ service<http:Service> LoanService bind secureLoanServiceEp {
             scopes:["underwriter"]
         }
     }
-    add_application_review (endpoint caller, http:Request request, ApplicationReview applicationReview) {
-        json message = check <json> applicationReview;
-        _ = caller->respond({"Stats" : "Submit Review", "ApplicationID" : untaint applicationReview.appid,
-                            "Message" : untaint message}) but { error e => log:printError("Error sending response", err = e) };
 
-        message -> reviewChannel, applicationReview.appid;            
+
+    resource function add_application_review(http:Caller caller, http:Request req, ApplicationReview applicationReview) {
+
+        json jsonMsg;
+        json Msg;
+        Msg = check <json> applicationReview;
+
+        jsonMsg = {"Stats" : "Submit Review", "ApplicationID" : untaint applicationReview.appid,
+                            "Message" : untaint Msg};
+    
+        error? result = caller -> respond(jsonMsg);
+        if (result is error) {
+            io:println("Error in responding", result);
+        }
+
+        Msg ->  reviewChannel, applicationReview.appid;             
     }
 
     @http:ResourceConfig {
         methods: ["GET"],
-        path: "/init_db/"
+        path: "/init_db"
     }
-    initDB(endpoint caller, http:Request request) {
-        _ = appdb->update("CREATE TABLE APPLICATION_ENTRY (appid VARCHAR(100), data CLOB, PRIMARY KEY (appid))");
-        _ = caller->respond("OK") but { error e => log:printError("Error sending response", err = e) };
+
+    resource function initDB(http:Caller caller, http:Request req) {
+
+
+        error? resultdb = check appdb->update("CREATE TABLE APPLICATION_ENTRY (appid VARCHAR(100), data CLOB, PRIMARY KEY (appid))");
+        if (result is error) {
+            io:println("Error in resultdb", result);
+        } 
+        error? result = caller -> respond(resultdb);
+        if (result is error) {
+            io:println("Error in result", result);
+        }            
     }
 
 }
@@ -141,11 +192,11 @@ function getAllApplicationEntries() returns json {
 function generateDBResultJSON(table<DBEntry> data) returns json {
     json result = [];
     int i = 0;
-    foreach entry in data {
+    
+    foreach var entry in data {
         io:println(entry);
         io:StringReader reader = new io:StringReader(entry.data);
         result[i] = check reader.readJson();
-        i++;
     }
     return result;
 }
@@ -179,7 +230,7 @@ function processReviewApplication(ApplicationEntry entry) {
     // Wait for review decision. These channel receives are used to wait for external 
     // triggers to be sent to the process to continue the execution
     runtime:checkpoint();
-    message <- reviewChannel, entry.appid;
+    message -> reviewChannel, entry.appid;
     string result = check <string> message.result;
     string comment = check <string> message.comment;
     io:println("Review Received: " + result, ", Message: ", comment);
